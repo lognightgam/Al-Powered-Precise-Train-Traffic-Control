@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Train Dispatching System - Admin Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .train { transition: left 1s linear, top 1s linear; z-index: 10; }
+        .signal { z-index: 5; }
+        .log-entry { animation: fadeIn 0.5s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1f2937; }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 flex h-screen overflow-hidden">
+
+<aside class="w-1/3 bg-gray-800 p-4 flex flex-col h-screen space-y-4">
+    <div class="flex items-center justify-between pb-2 border-b border-gray-700">
+        <h1 class="text-2xl font-bold text-cyan-400">Admin Panel</h1>
+        <div id="ai-status" class="flex items-center space-x-2">
+            <span class="text-sm font-medium">AI ACTIVE</span>
+            <div class="h-3 w-3 bg-green-500 rounded-full animate-pulse"></div>
+        </div>
+    </div>
+
+    <div class="flex-1 bg-gray-900 rounded-lg p-3 flex flex-col min-h-0">
+        <h2 class="text-lg font-semibold text-cyan-300 mb-2">Live AI Decision Log</h2>
+        <div id="ai-log" class="flex-1 overflow-y-auto space-y-2 pr-2"></div>
+    </div>
+
+    <div class="bg-gray-900 rounded-lg p-3">
+        <h2 class="text-lg font-semibold text-cyan-300 mb-2">What-If Simulation</h2>
+        <div class="space-y-3">
+            <select id="sim-event-type" class="w-full bg-gray-700 border-gray-600 rounded-md p-2 focus:ring-cyan-500 focus:border-cyan-500">
+                <option value="delay">Simulate Train Delay</option>
+                <option value="track_closure">Simulate Track Closure</option>
+                <option value="new_train">Add Unscheduled Train</option>
+            </select>
+            <div id="sim-inputs"></div>
+            <button id="run-simulation-btn" class="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">
+                <i class="fas fa-play mr-2"></i>Run Simulation
+            </button>
+        </div>
+    </div>
+
+    <div class="bg-gray-900 rounded-lg p-3">
+        <h2 class="text-lg font-semibold text-cyan-300 mb-2">Performance KPIs</h2>
+        <div class="grid grid-cols-2 gap-3 text-center">
+            <div>
+                <div class="font-bold text-2xl text-green-400" id="kpi-punctuality">99.1%</div>
+                <div class="text-sm text-gray-400">Punctuality</div>
+            </div>
+            <div>
+                <div class="font-bold text-2xl text-yellow-400" id="kpi-avg-delay">1.2m</div>
+                <div class="text-sm text-gray-400">Avg. Delay</div>
+            </div>
+        </div>
+    </div>
+</aside>
+
+<main class="w-2/3 p-4 relative bg-gray-900">
+    <div id="track-container" class="relative w-full h-full bg-gray-800/50 rounded-lg overflow-hidden p-8"></div>
+</main>
+
+<div id="simulation-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+    <div class="bg-gray-800 rounded-lg shadow-xl p-6 w-1/2 max-w-2xl transform transition-all scale-95 opacity-0">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-xl font-bold text-cyan-400">Simulation Analysis & AI Recommendation</h2>
+            <button id="close-modal-btn" class="text-gray-400 hover:text-white">&times;</button>
+        </div>
+        <div id="simulation-result" class="text-sm space-y-3"></div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const API_BASE = '/api';
+    const trackContainer = document.getElementById('track-container');
+    const aiLog = document.getElementById('ai-log');
+    const simEventType = document.getElementById('sim-event-type');
+    const simInputs = document.getElementById('sim-inputs');
+    const runSimulationBtn = document.getElementById('run-simulation-btn');
+    const simulationModal = document.getElementById('simulation-modal');
+    const simulationResult = document.getElementById('simulation-result');
+    const closeModalBtn = document.getElementById('close-modal-btn');
+    let latestLogTimestamp = 0;
+    let trainsData = {};
+    const TRACK_HEIGHT = 100;
+
+    function renderTracksAndSignals(signals){
+        trackContainer.innerHTML = '';
+        for(let i=0;i<3;i++){
+            const trackEl = document.createElement('div');
+            trackEl.className='absolute w-full h-1 bg-gray-600';
+            trackEl.style.top=`${(i+1)*TRACK_HEIGHT}px`;
+            trackContainer.appendChild(trackEl);
+        }
+        Object.entries(signals).forEach(([id,s])=>{
+            const sEl=document.createElement('div');
+            sEl.id=`signal-${id}`;
+            sEl.className='signal absolute w-4 h-4 rounded-full border-2 border-gray-500';
+            sEl.style.left=`calc(${s.position}% - 8px)`;
+            sEl.style.top=`${(s.track+1)*TRACK_HEIGHT-24}px`;
+            trackContainer.appendChild(sEl);
+            updateSignalElement(id,s.state);
+        });
+    }
+
+    function updateSignalElement(id,state){
+        const colors={
+            GREEN:'bg-green-500 shadow-[0_0_10px_2px_rgba(34,197,94,0.7)]',
+            RED:'bg-red-500 shadow-[0_0_10px_2px_rgba(239,68,68,0.7)]',
+            YELLOW:'bg-yellow-400 shadow-[0_0_10px_2px_rgba(250,204,21,0.7)]'
+        };
+        const el=document.getElementById(`signal-${id}`);
+        if(el) el.className=`signal absolute w-4 h-4 rounded-full border-2 border-gray-500 ${colors[state]||'bg-gray-700'}`;
+    }
+
+    function renderOrUpdateTrains(trains){
+        trains.forEach(train=>{
+            let tEl=document.getElementById(`train-${train.id}`);
+            if(!tEl){
+                tEl=document.createElement('div');
+                tEl.id=`train-${train.id}`;
+                tEl.className='train absolute flex items-center justify-center h-6 bg-cyan-500 rounded text-xs text-white font-bold cursor-pointer px-2';
+                tEl.textContent=train.id;
+                trackContainer.appendChild(tEl);
+            }
+            tEl.style.left=`calc(${train.position}% - 20px)`;
+            tEl.style.top=`${(train.track+1)*TRACK_HEIGHT-12}px`;
+            tEl.title=`Train ${train.id} | Speed: ${train.speed} km/h | Status: ${train.status}`;
+            trainsData[train.id]=train;
+        });
+        const currentIds=trains.map(t=>`train-${t.id}`);
+        document.querySelectorAll('.train').forEach(el=>{if(!currentIds.includes(el.id)) el.remove();});
+    }
+
+    function updateAILog(logs){
+        logs.forEach(log=>{
+            const logEl=document.createElement('div');
+            logEl.className='log-entry bg-gray-800 p-2 rounded-md text-xs';
+            const icons={INFO:'fas fa-info-circle text-blue-400', ACTION:'fas fa-cogs text-cyan-400', WARNING:'fas fa-exclamation-triangle text-yellow-400'};
+            logEl.innerHTML=`<div class="flex items-start space-x-2"><i class="${icons[log.level]||'fas fa-info-circle'} mt-1"></i>
+            <div><span class="font-mono text-gray-500">${new Date(log.timestamp*1000).toLocaleTimeString()}</span>
+            <p class="text-gray-300">${log.message}</p></div></div>`;
+            aiLog.prepend(logEl);
+            latestLogTimestamp=Math.max(latestLogTimestamp,log.timestamp);
+        });
+        while(aiLog.children.length>100) aiLog.removeChild(aiLog.lastChild);
+    }
+
+    async function fetchSystemState(){
+        try{
+            const res=await fetch(`${API_BASE}/state?since=${latestLogTimestamp}`);
+            const state=await res.json();
+            if(!document.querySelector('.signal')) renderTracksAndSignals(state.signals);
+            else Object.entries(state.signals).forEach(([id,s])=>updateSignalElement(id,s.state));
+            renderOrUpdateTrains(state.trains);
+            updateAILog(state.logs);
+            document.getElementById('kpi-punctuality').textContent=`${state.kpis.punctuality.toFixed(1)}%`;
+            document.getElementById('kpi-avg-delay').textContent=`${state.kpis.avg_delay.toFixed(1)}m`;
+        }catch(err){
+            console.error(err);
+            const aiStatus=document
